@@ -1,0 +1,13 @@
+# build output
+build/
+*.o
+*.obj
+*.exe
+
+# local test appdata
+build/testappdata/
+
+# editors
+.vs/
+.vscode/
+.idea/

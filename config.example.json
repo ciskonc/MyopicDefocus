@@ -1,0 +1,16 @@
+{
+  "version": 2,
+  "common": {
+    "effectStrength": 0.65,
+    "screenDistanceCM": 55.0,
+    "pupilSizeUm": 6500.0,
+    "diagInch": 0.0
+  },
+  "perScreen": {},
+  "hideFromCapture": true,
+  "autoStart": false,
+  "includeVirtualDisplays": false,
+  "fpsCap": 0,
+  "pauseOnFullscreenGame": true,
+  "floatingIconMode": -1
+}

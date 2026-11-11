@@ -1,0 +1,10 @@
+# 行尾规则：bash 脚本必须 LF（CRLF 会让 bash 报错），其余文本自动
+* text=auto
+*.sh text eol=lf
+*.rc text
+*.manifest text
+*.cpp text
+*.h text
+*.md text
+*.json text
+*.ico binary

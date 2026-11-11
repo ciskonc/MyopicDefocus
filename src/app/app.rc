@@ -1,0 +1,36 @@
+// ==========================================
+// app.rc — 资源脚本
+// ==========================================
+// 托盘图标与窗口图标。由 windres 编译（见 scripts/build.sh）。
+// 注意：这里不 #include <windows.h> —— windres 不是 C 预处理器。
+
+// 托盘图标（16/24/32/48/256 多尺寸）
+101 ICON "resources/icon.ico"
+
+1 VERSIONINFO
+FILEVERSION     1,0,0,0
+PRODUCTVERSION  1,0,0,0
+FILEOS          0x00040004
+FILETYPE        0x00000001
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "080404b0"
+        BEGIN
+            VALUE "FileDescription", "MyopicDefocus - 近视离焦护眼滤镜"
+            VALUE "FileVersion",     "1.0.0.0"
+            VALUE "InternalName",    "MyopicDefocus"
+            VALUE "OriginalFilename","MyopicDefocus.exe"
+            VALUE "ProductName",     "MyopicDefocus"
+            VALUE "ProductVersion",  "1.0.0.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0804, 1200
+    END
+END
+
+// 应用程序清单：声明 Common Controls v6（启用现代视觉样式）
+// 没有它，控件会渲染成 Windows 95 经典 3D 灰色风格
+1 24 "app.manifest"
