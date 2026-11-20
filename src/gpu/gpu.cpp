@@ -99,7 +99,46 @@ OverlayArea ComputeOverlayArea(const ::md::core::ScreenInfo& s) {
     return a;
 }
 
+// ==========================================
+// 截图隐藏：能力探测 + 统一包装（耐操性审查 P1-A）
+// ==========================================
+// WDA_EXCLUDEFROMCAPTURE (0x11) 是 Win10 2004 (build 19041) 才引入的值；
+// 1809~1909（含 LTSC 2019）上调用会失败 → overlay 进入自身捕获流 →
+// 逐帧递归叠加 → GPU 打满卡死，且递归自愈调的也是同一个失败 API。
+// 所以：启动时探测一次；不支持时视为「未隐藏」，看门狗阈值收紧，
+// 主循环弹一次性风险提示。全部调用点必须走 TrySetDisplayAffinity。
+bool g_wdaExcludeSupported = false;
+bool g_wdaProbed = false;
+
+void ProbeDisplayAffinitySupport() {
+    if (g_wdaProbed) return;
+    g_wdaProbed = true;
+    // 用一个 1x1 的临时窗口试设一次：成功即支持
+    HWND probe = ::CreateWindowExW(WS_EX_NOACTIVATE, L"STATIC", L"", WS_POPUP,
+                                   0, 0, 1, 1, nullptr, nullptr,
+                                   ::GetModuleHandleW(nullptr), nullptr);
+    if (probe) {
+        g_wdaExcludeSupported = ::SetWindowDisplayAffinity(probe, WDA_EXCLUDEFROMCAPTURE) != FALSE;
+        ::DestroyWindow(probe);
+    }
+    if (!g_wdaExcludeSupported) {
+        LogInfo("[gpu] WDA_EXCLUDEFROMCAPTURE unsupported (Win10 <2004) - capture hiding disabled, recursion watchdog tightened");
+    }
+}
+
+// 统一入口：支持才真正设置；不支持返回 false（调用方按"未隐藏"处理）
+bool TrySetDisplayAffinity(HWND hwnd, bool hide) {
+    ProbeDisplayAffinitySupport();
+    if (hide && !g_wdaExcludeSupported) return false;
+    return ::SetWindowDisplayAffinity(hwnd, hide ? WDA_EXCLUDEFROMCAPTURE : 0) != FALSE;
+}
+
 } // namespace
+
+bool ScreenRenderer::IsCaptureHidingSupported() {
+    ProbeDisplayAffinitySupport();
+    return g_wdaExcludeSupported;
+}
 
 
 // ---------------------------------------------------------------
@@ -191,13 +230,16 @@ void RenderManager::CheckRecursion() {
         r->lastSharpness_ = sharp;
 
         // 连续 3 次检测都大幅变糊 → 判定为「抓到自己」的递归叠加
-        if (r->sharpnessDropStreak_ >= 3) {
+        // P1-A：老系统无截图隐藏能力时，唯一防线只剩「隐藏 overlay 窗口」，
+        // 看门狗阈值收紧到 2 次（约 1 秒@30帧检测频度），更早介入
+        const int recursionThreshold = hideFromCapture_ ? 3 : 2;
+        if (r->sharpnessDropStreak_ >= recursionThreshold) {
             r->sharpnessDropStreak_ = 0;
             LogInfo("[gpu] recursion detected - force enable capture hiding");
             if (!hideFromCapture_) {
                 hideFromCapture_ = true;
                 for (auto& e2 : entries_) {
-                    if (e2->hwnd) ::SetWindowDisplayAffinity(e2->hwnd, WDA_EXCLUDEFROMCAPTURE);
+                    if (e2->hwnd) TrySetDisplayAffinity(e2->hwnd, true);
                 }
             }
             if (recursionCb_) recursionCb_(recursionUser_);
@@ -264,6 +306,30 @@ bool ScreenRenderer::InitDuplication() {
             hr = output1->DuplicateOutput(device_, &duplication_);
             if (FAILED(hr)) {
                 LogHr("DuplicateOutput", hr);
+                // 耐操性审查 P1-D：DuplicateOutput 要求 output 与 device 同适配器。
+                // 共享设备建在默认适配器上——多 GPU 机器（Optimus/双独显）挂第二块
+                // GPU 的屏在这里必败。按该 output 所在适配器重建专用设备重试一次。
+                Microsoft::WRL::ComPtr<ID3D11Device> altDevice;
+                Microsoft::WRL::ComPtr<ID3D11DeviceContext> altContext;
+                D3D_FEATURE_LEVEL fl = D3D_FEATURE_LEVEL_11_0;
+                hr = D3D11CreateDevice(adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr,
+                                       D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0,
+                                       D3D11_SDK_VERSION, &altDevice, &fl, &altContext);
+                if (SUCCEEDED(hr)) {
+                    hr = output1->DuplicateOutput(altDevice.Get(), &duplication_);
+                    if (SUCCEEDED(hr)) {
+                        device_ = altDevice.Get();
+                        context_ = altContext.Get();
+                        swapChain_.Reset();
+                        rtv_.Reset();
+                        LogInfo("[gpu] screen " + screen_.deviceName +
+                                " now attached to its own adapter - per-GPU device");
+                        return true;
+                    }
+                    LogHr("DuplicateOutput(on-own-adapter)", hr);
+                } else {
+                    LogHr("D3D11CreateDevice(on-own-adapter)", hr);
+                }
                 return false;
             }
             return true;
@@ -348,9 +414,11 @@ bool ScreenRenderer::Init(const ::md::core::ScreenInfo& screen, HWND hwnd) {
 
     // ⚠ 必须在窗口显示前设置：Desktop Duplication 会抓到自己进程的 overlay 窗口，
     //   形成逐帧叠加的递归（画面溶解重叠 + GPU 打满卡死）。
+    //   P1-A：老系统（<2004）不支持时 TrySetDisplayAffinity 返回 false——
+    //   不假装已隐藏，hideFromCapture_ 如实翻 false，看门狗阈值据此收紧。
     if (hideFromCapture_) {
-        if (!::SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)) {
-            LogWin32("SetWindowDisplayAffinity", ::GetLastError());
+        if (!TrySetDisplayAffinity(hwnd, true)) {
+            hideFromCapture_ = false;   // 不支持 = 实际未隐藏，如实反映
         }
     }
 
@@ -480,6 +548,24 @@ void ScreenRenderer::CaptureFrame() {
                     if (hwnd) InitSwapChain(hwnd, srcDesc.Width, srcDesc.Height);
                 }
 
+                // 耐操性审查 P1-B：分辨率/旋转变化后 overlay 窗口矩形必须同步，
+                // 否则旧尺寸窗口残留桌面（实测残留 12s+ / 竖屏溢出 840px）。
+                {
+                    HWND hwnd = nullptr;
+                    if (swapChain_) swapChain_->GetHwnd(&hwnd);
+                    if (hwnd) {
+                        ::SetWindowPos(hwnd, nullptr,
+                                       screen_.x, screen_.y,
+                                       static_cast<int>(srcDesc.Width),
+                                       static_cast<int>(srcDesc.Height),
+                                       SWP_NOACTIVATE | SWP_NOZORDER);
+                    }
+                }
+                screen_.width  = static_cast<int>(srcDesc.Width);
+                screen_.height = static_cast<int>(srcDesc.Height);
+                LogInfo("[gpu] display mode changed - overlay resized to " +
+                        std::to_string(srcDesc.Width) + "x" + std::to_string(srcDesc.Height));
+
                 UpdateShaderParams();
             }
 
@@ -540,8 +626,18 @@ void ScreenRenderer::UpdateShaderParams() {
     geo.pupilSizeUm = s.params.pupilSizeUm;
 
     ::md::core::BlurRadii r = ::md::core::ComputeBlurRadii(geo);
-    blurB_ = r.blue;
-    blurG_ = r.green;
+
+    // 耐操性审查 P0-A②/P1-E（渲染端双保险）：
+    // 卷积核 range = max(8, floor(σ*1.7)) 是逐像素动态循环，σ 上不封顶时
+    // 一个合法滑块组合（4K + 10cm + 大瞳孔）即可让 GPU 负载爆炸/驱动 TDR。
+    // 这里封死非有限值与过大的 σ（128px 上限 ≈ 物理上远超任何真实离焦场景）。
+    const float kSigmaMax = 128.0f;
+    const auto safe = [kSigmaMax](float v) {
+        if (!(v >= 0.0f) || v > kSigmaMax) return kSigmaMax;   // NaN/负/inf → 上限
+        return v;
+    };
+    blurB_ = safe(r.blue);
+    blurG_ = safe(r.green);
 }
 
 
@@ -963,13 +1059,9 @@ void RenderManager::SetHideFromCapture(bool hide) {
     hideFromCapture_ = hide;
     for (auto& e : entries_) {
         if (!e->hwnd) continue;
-        if (hide) {
-            if (!::SetWindowDisplayAffinity(e->hwnd, WDA_EXCLUDEFROMCAPTURE)) {
-                LogWin32("SetWindowDisplayAffinity", ::GetLastError());
-            }
-        } else {
-            // 0 表示恢复默认（可被捕获）
-            ::SetWindowDisplayAffinity(e->hwnd, 0);
+        // P1-A：统一走能力感知包装（老系统 hide=true 时返回 false 且不改状态）
+        if (!TrySetDisplayAffinity(e->hwnd, hide)) {
+            if (hide) LogWin32("SetWindowDisplayAffinity", ::GetLastError());
         }
     }
 }

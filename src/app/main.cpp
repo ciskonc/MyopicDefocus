@@ -29,6 +29,22 @@ md::gpu::RenderManager g_render;
 HWND  g_mainWnd = nullptr;
 HANDLE g_singleMutex = nullptr;
 
+// 耐操性审查 P1-C：应用级退出标志。
+// 模态循环（向导对话框/MessageBox/托盘 TrackPopupMenu）会消费 WM_QUIT，
+// 导致模态期间的热键/菜单退出失效；改为「置标志 + 主循环与模态返回后检查」。
+bool g_quitRequested = false;
+
+// 耐操性审查 P1-F：脏标志——仅当会话内发生过显式参数变更才在退出时写盘，
+// 防止「读失败→默认值」被无条件保存覆盖用户配置。
+bool g_configDirty = false;
+
+// ── 后台弹窗线程约定（耐操性审查 P2 备案，改代码前必读）──
+// 下述三处 std::thread + detach 弹 MessageBox 的约束：
+//   1. lambda 内【禁止】触碰任何全局状态（g_state/g_render/LogInfo/堆分配容器）——
+//      线程会在进程退出瞬间被硬杀，触碰共享状态=未定义行为
+//   2. 弹窗加 MB_TOPMOST：不能 join（没人点会挂死退出），TOPMOST 保证
+//      用户至少能看见它；用户没点就消失属已知取舍
+//   3. 只允许传值捕获，禁止引用捕获
 constexpr UINT WM_APP_QUIT = WM_APP + 3;
 constexpr wchar_t kMainClass[] = L"MyopicDefocusMain";
 
@@ -51,6 +67,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         // 全局热键：托盘不可用（某些环境下 Shell_NotifyIcon 会被拒）时的可靠出口
         switch (wp) {
         case 1:   // Ctrl+Alt+Q 退出
+            g_quitRequested = true;   // P1-C：模态循环吞 WM_QUIT，改用标志位
             PostQuitMessage(0);
             return 0;
         case 2:   // Ctrl+Alt+S 打开设置面板
@@ -72,9 +89,11 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
 
     case WM_APP_QUIT:
+        g_quitRequested = true;   // P1-C：托盘菜单退出同样置标志
         PostQuitMessage(0);
         return 0;
     case WM_DESTROY:
+        g_quitRequested = true;
         PostQuitMessage(0);
         return 0;
     default:
@@ -93,7 +112,12 @@ void RefreshScreens() {
 
 // 参数变化 → 落盘 + 推给渲染器
 void OnParamsChanged() {
+    g_configDirty = true;
     md::core::SaveConfig(g_state.config);
+    // 耐操性审查 P2：hideFromCapture 开关此前只写 config 不下发渲染器——
+    // 面板取消勾选后什么都没发生，重启又被安全闸门改回。现在真切换。
+    // （渲染端能力感知：老系统不支持时 SetHideFromCapture 内部按未隐藏处理）
+    g_render.SetHideFromCapture(g_state.config.hideFromCapture);
     for (const auto& s : g_state.screens) {
         g_render.UpdateParams(s.id, s.params);
     }
@@ -135,7 +159,7 @@ void PrintUsage() {
         L"  MyopicDefocus.exe --help       显示本帮助\n"
         L"\n"
         L"配置文件：%APPDATA%\\MyopicDefocus\\config.json\n";
-    MessageBoxW(nullptr, text, L"MyopicDefocus", MB_OK | MB_ICONINFORMATION);
+    MessageBoxW(nullptr, text, L"MyopicDefocus", MB_OK | MB_ICONINFORMATION | MB_TOPMOST);
 }
 
 } // namespace
@@ -186,7 +210,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     if (mode == L"reset") {
         g_state.config = md::core::MakeDefaultConfig();
         md::core::SaveConfig(g_state.config);
-        MessageBoxW(nullptr, L"配置已恢复默认。", L"MyopicDefocus", MB_OK | MB_ICONINFORMATION);
+        MessageBoxW(nullptr, L"配置已恢复默认。", L"MyopicDefocus", MB_OK | MB_ICONINFORMATION | MB_TOPMOST);
         return 0;
     }
 
@@ -195,7 +219,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     if (g_singleMutex && GetLastError() == ERROR_ALREADY_EXISTS) {
         MessageBoxW(nullptr,
                     L"程序已在运行。\n请在系统托盘（右下角）找到图标并右键打开设置面板。",
-                    L"MyopicDefocus", MB_OK | MB_ICONINFORMATION);
+                    L"MyopicDefocus", MB_OK | MB_ICONINFORMATION | MB_TOPMOST);
         if (g_singleMutex) CloseHandle(g_singleMutex);
         return 0;
     }
@@ -211,18 +235,23 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
 
     // 屏幕物理对角线自动探测（EDID 注册表）
     // 面板不再提供对角线输入——它是硬件固定属性，应由系统数据决定而非用户猜。
+    // 耐操性审查 P2：探测失败时**保留磁盘上的历史成功值**——旧逻辑用回退值 24
+    // 覆盖了探测成功落盘的 27.5，且日志声称 "kept" 与实际写入矛盾。语义改为：
+    //   probe 成功 → 用探测值（变更才落盘）
+    //   probe 失败 → 原 keep 语义真正落地（绝不用回退值覆盖）
     {
         const float before = g_state.config.common.diagInch;
-        const float probed = md::core::ProbeDiagonalInchOrDefault(before);
-        if (probed != before) {
+        const float probed = md::core::ProbeDiagonalInch();      // 失败返回 0
+        if (probed > 0.0f && probed != before) {
             g_state.config.common.diagInch = probed;
+            g_configDirty = true;
             md::core::SaveConfig(g_state.config);
             char b[160];
             sprintf_s(b, "[app] diagonal auto-detected: %.1f -> %.1f inch", before, probed);
             LogInfo(b);
-        } else {
+        } else if (probed <= 0.0f) {
             char b[160];
-            sprintf_s(b, "[app] diagonal: %.1f inch (probe unavailable, kept)", before);
+            sprintf_s(b, "[app] diagonal probe unavailable - keeping %.1f inch", before);
             LogInfo(b);
         }
     }
@@ -235,6 +264,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     if (!g_state.config.hideFromCapture) {
         LogInfo("[app] hideFromCapture was off - forcing it back on (recursion safety)");
         g_state.config.hideFromCapture = true;
+        g_configDirty = true;
         md::core::SaveConfig(g_state.config);
         std::thread([] {
             ::MessageBoxW(nullptr,
@@ -242,7 +272,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
                 std::wstring(L"该状态会导致画面无限叠加、整机卡死，已自动恢复为开启。") + std::wstring(1, (wchar_t)10) +
                 std::wstring(1, (wchar_t)10) +
                 L"（如需在截图里看到滤镜效果，请用 MyopicDefocus.exe --capture 导出画面。）").c_str(),
-                L"MyopicDefocus", MB_OK | MB_ICONWARNING);
+                L"MyopicDefocus", MB_OK | MB_ICONWARNING | MB_TOPMOST);
         }).detach();
     }
 
@@ -270,7 +300,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     // ---------------- GPU 与屏幕 ----------------
     if (!g_render.Init(g_mainWnd)) {
         MessageBoxW(nullptr, L"无法初始化图形设备（D3D11）。\n请确认显卡驱动正常。",
-                    L"MyopicDefocus", MB_OK | MB_ICONERROR);
+                    L"MyopicDefocus", MB_OK | MB_ICONERROR | MB_TOPMOST);
         return -1;
     }
     g_render.SetFpsCap(g_state.config.fpsCap);
@@ -279,7 +309,21 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
 
     if (!g_render.SetupScreens(g_state.screens)) {
         MessageBoxW(nullptr, L"未能创建任何屏幕的滤镜窗口。",
-                    L"MyopicDefocus", MB_OK | MB_ICONWARNING);
+                    L"MyopicDefocus", MB_OK | MB_ICONWARNING | MB_TOPMOST);
+    }
+
+    // P1-A 收尾：老系统（Win10 <2004）不支持截图隐藏 API——递归叠加灾难的
+    // 唯一系统级防线缺失。渲染端已自动降级（隐藏视为关闭 + 看门狗收紧），
+    // 这里给用户一次性的明示，避免"莫名卡死"时无从归因。
+    if (!g_render.IsCaptureHidingSupported()) {
+        std::thread([] {
+            ::MessageBoxW(nullptr,
+                L"当前 Windows 版本（Win10 2004 之前）不支持「对截图/录屏隐藏」。\n\n"
+                L"软件已自动改用增强看门狗防护，但极端情况下（滤镜画面自我叠加）\n"
+                L"仍可能造成画面异常，此时请用 Ctrl+Alt+Q 退出。\n\n"
+                L"建议升级到 Win10 2004 或更新版本以获得完整防护。",
+                L"MyopicDefocus", MB_OK | MB_ICONWARNING | MB_TOPMOST);
+        }).detach();
     }
 
     // 注册 TaskbarCreated 广播消息（explorer 重启时系统广播）
@@ -320,6 +364,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
             auto* st = static_cast<md::ui::AppState*>(user);
             if (!st) return;
             st->config.hideFromCapture = true;
+            g_configDirty = true;
             md::core::SaveConfig(st->config);
             md::ui::ShowTrayTip(L"MyopicDefocus",
                 L"检测到画面在自我叠加（会导致卡死），\n"
@@ -342,7 +387,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
                 L"    Ctrl+Alt+S   打开设置面板\n"
                 L"    Ctrl+Alt+P   暂停 / 恢复效果\n"
                 L"    Ctrl+Alt+Q   退出程序",
-                L"MyopicDefocus", MB_OK | MB_ICONINFORMATION);
+                L"MyopicDefocus", MB_OK | MB_ICONINFORMATION | MB_TOPMOST);
         }).detach();
 
         // 托盘不可用时，用纯 Win32 的右下角小图标兜底：
@@ -383,12 +428,29 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     // 抓屏恢复后自动回来，无需用户干预。
     // 窗口可见性状态源 = g_overlayShown（文件级，OnToggleOverlay 也会更新它）
     bool wasDegraded  = false;    // 上一轮抓屏健康状态（边沿提示用）
+
+    // 耐操性审查 P2（J-3）：`cmd start /b` 等非标准启动方式会得到一个
+    // 「初始化完成但消息循环永不运转」的僵死实例（实测 CPU=0/无窗口/无日志）。
+    // 自检：主循环建立 10 秒内必须消费过至少一条消息或渲染过一帧，
+    // 否则判定僵死自杀退出（日志留痕），避免留下无声进程。
+    const DWORD mainLoopStart = GetTickCount();
+    bool mainLoopProvenAlive = false;
+
     MSG msg;
     for (;;) {
         while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            mainLoopProvenAlive = true;
             if (msg.message == WM_QUIT) goto shutdown;
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
+        }
+        // P1-C：模态循环可能已吞掉 WM_QUIT，但标志位一定还在——兜底退出
+        if (g_quitRequested) goto shutdown;
+
+        if (!mainLoopProvenAlive &&
+            GetTickCount() - mainLoopStart > 10000) {
+            LogInfo("[app] main loop unresponsive for 10s after startup (non-interactive launch?) - exiting");
+            goto shutdown;
         }
 
         if (g_state.overlayActive) {
@@ -437,7 +499,10 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
 shutdown:
     md::ui::RemoveTrayIcon();   // 退出前移除托盘图标（防死图标堆积）
     g_render.Shutdown();
-    md::core::SaveConfig(g_state.config);
+    // 耐操性审查 P1-F：只有本次会话确实改过参数才落盘。
+    // 无条件保存会把「读失败 → 内存里是默认值」的状态覆盖回磁盘，抹掉用户手调参数
+    //（config 被存成 UTF-16 等编码错误场景）。启动后的显式变更都会置 dirty。
+    if (g_configDirty) md::core::SaveConfig(g_state.config);
     if (g_singleMutex) { CloseHandle(g_singleMutex); g_singleMutex = nullptr; }
     return 0;
 }

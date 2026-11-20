@@ -41,6 +41,10 @@ public:
     // 开启后 overlay 不进入捕获流，递归从根上消失。
     void SetHideFromCapture(bool hide) { hideFromCapture_ = hide; }
 
+    // P1-A：本机是否支持截图隐藏（WDA_EXCLUDEFROMCAPTURE，Win10 2004+）。
+    // 由 RenderManager 转发；不支持时 Init 内自动降级（视为未隐藏 + 看门狗收紧）。
+    static bool IsCaptureHidingSupported();
+
     // 绑定一块屏幕并初始化 GPU 资源
     bool Init(const ::md::core::ScreenInfo& screen, HWND hwnd) override;
 
@@ -181,6 +185,11 @@ public:
 
     // 帧率上限（0 = 不额外限制，各屏按自身刷新率）
     void SetFpsCap(int fps) { fpsCap_ = fps; }
+
+    // P1-A：本机是否支持截图隐藏（Win10 2004+），供主循环弹风险提示
+    static bool IsCaptureHidingSupported() {
+        return ::md::gpu::ScreenRenderer::IsCaptureHidingSupported();
+    }
 
     // 把各屏的抓屏帧与渲染帧存成 BMP（效果取证 / 诊断）
     bool SaveFrames(const std::wstring& dir, const std::wstring& tag);

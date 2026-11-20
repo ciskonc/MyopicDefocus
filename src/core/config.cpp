@@ -91,7 +91,26 @@ double Round6(float v) {
 }
 
 // 安全解析：任何异常都吞掉，返回 false
+// 耐操性审查 P0-C：nlohmann 递归 parser 无深度限制，深嵌套 JSON 会栈溢出
+//（0xC00000FD 无法被 try/catch 捕获）→ 解析前先做字符级嵌套深度预检。
 bool ParseJsonSafe(const std::string& text, json& out) {
+    // 嵌套深度预检：只数 [] {} 的净深度（字符串内的引号粗略跳过）
+    constexpr int kMaxNesting = 200;   // 合法配置最深层不超过 5 层
+    int depth = 0;
+    bool inString = false;
+    for (char c : text) {
+        if (inString) {
+            if (c == '\\') continue;          // 粗略跳过转义（够用：只为限深）
+            if (c == '"') inString = false;
+            continue;
+        }
+        if (c == '"') { inString = true; continue; }
+        if (c == '[' || c == '{') {
+            if (++depth > kMaxNesting) return false;   // 判非法 → 走默认配置
+        } else if (c == ']' || c == '}') {
+            if (depth > 0) --depth;
+        }
+    }
     try {
         out = json::parse(text);
         return true;
@@ -226,14 +245,12 @@ std::string SerializeConfig(const Config& cfg) {
 // ==========================================
 
 bool LoadConfig(Config& out) {
-    // 统一出口防御：手编 config 可能写出 0/负值/超范围参数
-    //（diagInch=0 会在光学模型里造成 mm_per_px=0 → 除零），全部归到安全默认。
+    // 统一出口防御（P0-A/P0-B）：改用 DefocusParams::Sanitize 合理域钳制——
+    // 旧「≤0 归默认」防不住巨大正值（pupilSizeUm:9000000 → σ 爆炸 GPU 冻结）
+    // 与近零正值（diagInch:1e-9）；NaN 因比较恒 false 也被 Sanitize 归默认。
+    // perScreen 覆盖项由 ApplyTo 内的 Sanitize 同步覆盖。
     auto finish = [&out](bool ok) {
-        if (out.common.diagInch        <= 0.0f) out.common.diagInch        = 24.0f;
-        if (out.common.screenDistanceCM <= 0.0f) out.common.screenDistanceCM = 40.0f;
-        if (out.common.pupilSizeUm      <= 0.0f) out.common.pupilSizeUm      = 6500.0f;
-        if (out.common.effectStrength   <  0.0f) out.common.effectStrength   = 0.0f;
-        else if (out.common.effectStrength > 1.0f) out.common.effectStrength = 1.0f;
+        out.common.Sanitize();
         return ok;
     };
 
@@ -488,6 +505,40 @@ bool ReadTextFile(const std::filesystem::path& path, std::string& out) {
 
     std::error_code ec;
     if (!std::filesystem::is_regular_file(path, ec)) return false;
+
+    // 耐操性审查 P0-C：配置文件大小上限（合法配置 <10KB；超大文件必然非法，
+    // 也防止对超大输入做嵌套预检与解析的时间开销）
+    constexpr auto kMaxConfigBytes = 1ull * 1024ull * 1024ull;   // 1 MB
+    const auto fsize = static_cast<unsigned long long>(std::filesystem::file_size(path, ec));
+    if (ec || fsize == 0 || fsize > kMaxConfigBytes) return false;
+
+    // 耐操性审查 P1-F：编码嗅探。记事本「另存为」会把 UTF-8 config 写成
+    // UTF-16/ANSI——直接读出来是乱码、解析必失败，随后退出时的无条件保存
+    // 会把用户手调参数覆盖成默认值（数据丢失）。检测到非 UTF-8 编码时
+    // 先把原文件改存为 .bak（不覆盖已存在的备份），再返回失败。
+    {
+        unsigned char b[2] = {0, 0};
+        FILE* probe = nullptr;
+        if (_wfopen_s(&probe, path.c_str(), L"rb") == 0 && probe) {
+            const size_t rn = fread(b, 1, 2, probe);
+            fclose(probe);
+            const bool utf16le = (rn >= 2 && b[0] == 0xFF && b[1] == 0xFE);
+            const bool utf16be = (rn >= 2 && b[0] == 0xFE && b[1] == 0xFF);
+            // 无 BOM 且首字节含 0x00 → 高概率 UTF-16 无 BOM；或出现 GBK 高位字节对
+            const bool maybeUtf16NoBom = (rn >= 1 && b[0] == 0x00);
+            if (utf16le || utf16be || maybeUtf16NoBom) {
+                std::filesystem::path bak = path;
+                bak += L".encoding-bak";
+                std::error_code mec;
+                if (!std::filesystem::exists(bak, mec)) {
+                    std::filesystem::copy_file(path, bak,
+                        std::filesystem::copy_options::overwrite_existing, mec);
+                }
+                // core 层无日志依赖（模块约束）：静默降级，.encoding-bak 文件本身即提示
+                return false;
+            }
+        }
+    }
 
     // 用 C 文件 API（_wfopen）以支持非 ASCII 路径 —— libc++ 的 fstream 没有 wstring 构造
     FILE* fp = nullptr;

@@ -31,6 +31,26 @@ struct DefocusParams {
     float pupilSizeUm = 6500.0f;
     // 屏幕对角线（英寸）
     float diagInch = 24.0f;
+
+    // 合理物理域（耐操性审查 P0-B：只堵 ≤0 不够，巨大值/近零值会穿透到
+    // 光学模型造成 σ 爆炸 → GPU 冻结，或 σ≈inf→0 → 效果静默消失）
+    static constexpr float kDiagInchMin        = 5.0f;
+    static constexpr float kDiagInchMax        = 200.0f;
+    static constexpr float kDistanceMin        = 5.0f;    // cm
+    static constexpr float kDistanceMax        = 500.0f;  // cm
+    static constexpr float kPupilMin           = 1000.0f; // um
+    static constexpr float kPupilMax           = 12000.0f;// um
+
+    // 把非法值归到安全默认（P0-A/P0-B 统一钳制出口：
+    // common 与 perScreen 覆盖项都必须过这里）
+    void Sanitize() {
+        if (!(diagInch        >= kDiagInchMin && diagInch        <= kDiagInchMax)) diagInch        = 24.0f;
+        if (!(screenDistanceCM >= kDistanceMin && screenDistanceCM <= kDistanceMax)) screenDistanceCM = 40.0f;
+        if (!(pupilSizeUm      >= kPupilMin    && pupilSizeUm      <= kPupilMax))    pupilSizeUm      = 6500.0f;
+        // NaN 的比较恒为 false → 落进归默认分支，天然被防御
+        if (!(effectStrength >= 0.0f)) effectStrength = 0.0f;
+        else if (effectStrength > 1.0f) effectStrength = 1.0f;
+    }
 };
 
 // 单屏覆盖项。std::nullopt = 该项沿用通用值。
@@ -48,6 +68,9 @@ struct ScreenOverride {
         if (screenDistanceCM) p.screenDistanceCM = *screenDistanceCM;
         if (pupilSizeUm)      p.pupilSizeUm      = *pupilSizeUm;
         if (diagInch)        p.diagInch        = *diagInch;
+        // 耐操性审查 P0-A：覆盖项此前零防御（0/负/巨大值直通光学模型）。
+        // 合并后统一钳制——覆盖非法值等价于沿用通用值。
+        p.Sanitize();
     }
 };
 
