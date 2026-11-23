@@ -869,15 +869,21 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         return 0;
 
     case WM_KEYDOWN:
+        // 耐操性审查 P2（退出通道死代码修复）：overlay 无自己的消息泵，
+        // PostQuitMessage 在这里永远没人消费。Esc 转发主窗口退出通道。
         if (wParam == VK_ESCAPE) {
-            PostQuitMessage(0);
+            HWND mainWnd = ::FindWindowW(L"MyopicDefocusMain", nullptr);
+            if (mainWnd) ::PostMessageW(mainWnd, WM_APP + 3, 0, 0);   // WM_APP_QUIT
             return 0;
         }
         break;
 
-    case WM_APP + 2:   // Ctrl+Alt+Q 退出兜底
-        PostQuitMessage(0);
-        return 0;
+    case WM_APP + 2:   // 兜底退出（同样转发主窗口，修复死代码）
+        {
+            HWND mainWnd = ::FindWindowW(L"MyopicDefocusMain", nullptr);
+            if (mainWnd) ::PostMessageW(mainWnd, WM_APP + 3, 0, 0);
+            return 0;
+        }
     }
     return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
@@ -1075,6 +1081,9 @@ void RenderManager::ClearScreens() {
         if (e->renderer) e->renderer->Shutdown();
     }
     entries_.clear();
+    // 耐操性审查 P2：OverlayUserData 此前只 erase 指针不 delete（泄漏）。
+    // DestroyWindow 已触发各 WM_DESTROY（把自身从 vector 摘除），这里统一释放。
+    for (auto* data : g_overlayData) delete data;
     g_overlayData.clear();
 }
 

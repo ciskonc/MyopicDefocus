@@ -307,7 +307,16 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     // 对截图/录屏隐藏（默认开）
     g_render.SetHideFromCapture(g_state.config.hideFromCapture);
 
-    if (!g_render.SetupScreens(g_state.screens)) {
+    g_render.SetFpsCap(g_state.config.fpsCap);
+    // 对截图/录屏隐藏（默认开）
+    g_render.SetHideFromCapture(g_state.config.hideFromCapture);
+
+    // ⚠ 首次运行（无 config）时 SetupScreens **延后**到向导结束之后：
+    //   否则向导弹出的整个期间一个全屏模糊 overlay 盖住桌面且永不更新
+    //   （模态阻塞主循环，不渲染）——用户视角就是「画面冻结卡死」。
+    //   2026-11-23 真机复测 T6 时实测踩中，首次运行场景必修。
+    const bool deferredSetup = !hadConfig;
+    if (!deferredSetup && !g_render.SetupScreens(g_state.screens)) {
         MessageBoxW(nullptr, L"未能创建任何屏幕的滤镜窗口。",
                     L"MyopicDefocus", MB_OK | MB_ICONWARNING | MB_TOPMOST);
     }
@@ -414,11 +423,24 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     }
 
     // ---------------- 首次运行向导 ----------------
+    // overlay 此时还未创建（deferredSetup）——向导期间用户看到的桌面完全正常
     if (!hadConfig) {
+        // T6 日志锚点：向导是否真的弹出（历史五轮静默失败，必须可观测）
+        LogInfo("[app] first-run wizard showing...");
         if (md::ui::RunFirstRunWizard(g_mainWnd, &g_state)) {
+            LogInfo("[app] first-run wizard returned IDOK");
             RefreshScreens();
             OnParamsChanged();
+        } else {
+            LogInfo("[app] first-run wizard returned cancel/fail");
         }
+        // 向导结束（无论确定/取消）才创建并显示 overlay
+        if (deferredSetup && !g_render.SetupScreens(g_state.screens)) {
+            MessageBoxW(nullptr, L"未能创建任何屏幕的滤镜窗口。",
+                        L"MyopicDefocus", MB_OK | MB_ICONWARNING | MB_TOPMOST);
+        }
+    } else {
+        LogInfo("[app] config found - first-run wizard skipped");
     }
 
     // ---------------- 主循环 ----------------

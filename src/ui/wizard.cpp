@@ -13,6 +13,7 @@
 #include "ui.h"
 
 #include "../core/diag_probe.h"
+#include "../log.h"
 
 #include <cmath>
 #include <cwchar>
@@ -262,9 +263,28 @@ bool RunFirstRunWizard(HWND ownerWnd, AppState* state) {
     if (tmpl.empty()) return false;
 
     DLGTEMPLATE* dt = reinterpret_cast<DLGTEMPLATE*>(tmpl.data());
+    // 模板字节头（T6 诊断锚点：head/cdit/class 原子位置可肉眼比对）
+    {
+        char b[200];
+        sprintf_s(b, "[wizard] template bytes: %zu, head08=%02X%02X cdit=%u, w[18]=%04X w[20]=%04X w[22]=%04X",
+                  tmpl.size(),
+                  tmpl[8], tmpl[9],
+                  (unsigned)tmpl[10] | ((unsigned)tmpl[11] << 8),
+                  (unsigned)tmpl[18] | ((unsigned)tmpl[19] << 8),
+                  (unsigned)tmpl[20] | ((unsigned)tmpl[21] << 8),
+                  (unsigned)tmpl[22] | ((unsigned)tmpl[23] << 8));
+        LogInfo(b);
+    }
+    ::SetLastError(0);
     const INT_PTR r = ::DialogBoxIndirectParamW(
         ::GetModuleHandleW(nullptr), dt, ownerWnd, WizardDlgProc,
         reinterpret_cast<LPARAM>(state));
+    {
+        char b[120];
+        sprintf_s(b, "[wizard] DialogBoxIndirectParamW returned %ld, GetLastError=%lu",
+                  (long)r, ::GetLastError());
+        LogInfo(b);
+    }
 
     return r == IDOK;
 }

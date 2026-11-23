@@ -249,8 +249,18 @@ bool LoadConfig(Config& out) {
     // 旧「≤0 归默认」防不住巨大正值（pupilSizeUm:9000000 → σ 爆炸 GPU 冻结）
     // 与近零正值（diagInch:1e-9）；NaN 因比较恒 false 也被 Sanitize 归默认。
     // perScreen 覆盖项由 ApplyTo 内的 Sanitize 同步覆盖。
-    auto finish = [&out](bool ok) {
+    // 耐操性审查复测残留④（config 自愈）：解析成功但 Sanitize 修正了值时，
+    // 立即把修正结果写回磁盘——磁盘层的脏值不再原样保留。
+    // 注意只在「解析成功」分支自愈；读失败（编码错误等）绝不写盘（P1-F 保护）。
+    auto finish = [&out](bool ok, const Config& raw) {
         out.common.Sanitize();
+        if (ok &&
+            (raw.common.diagInch        != out.common.diagInch ||
+             raw.common.screenDistanceCM != out.common.screenDistanceCM ||
+             raw.common.pupilSizeUm      != out.common.pupilSizeUm ||
+             raw.common.effectStrength   != out.common.effectStrength)) {
+            SaveConfig(out);   // 自愈落盘
+        }
         return ok;
     };
 
@@ -260,19 +270,24 @@ bool LoadConfig(Config& out) {
 
     // 1) 新路径 %APPDATA%\MyopicDefocus\config.json
     if (detail::ReadTextFile(detail::NewConfigPath(), text)) {
-        if (detail::ParseConfigJsonV2(text, out)) return finish(true);
+        Config raw = out;
+        if (detail::ParseConfigJsonV2(text, raw)) { out = raw; return finish(true, raw); }
         // 新路径里放的也可能是旧格式文件（用户手动拷的）→ 照样能读
-        if (ParseLegacyConfig(text, out)) return finish(true);
+        raw = out;
+        if (ParseLegacyConfig(text, raw)) { out = raw; return finish(true, raw); }
     }
 
     // 2) 回退：exe 同目录的旧版 config.json
     if (detail::ReadTextFile(detail::LegacyConfigPath(), text)) {
-        if (detail::ParseConfigJsonV2(text, out)) return finish(true);
-        if (ParseLegacyConfig(text, out)) return finish(true);
+        Config raw = out;
+        if (detail::ParseConfigJsonV2(text, raw)) { out = raw; return finish(true, raw); }
+        raw = out;
+        if (ParseLegacyConfig(text, raw)) { out = raw; return finish(true, raw); }
     }
 
     out = MakeDefaultConfig();
-    return finish(false);
+    Config raw = out;
+    return finish(false, raw);
 }
 
 // ==========================================

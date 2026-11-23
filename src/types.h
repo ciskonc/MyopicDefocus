@@ -215,9 +215,6 @@ bool InitD3DDevice(HWND hwnd, void** outDevice, void** outContext);
 // 创建一块屏幕的渲染上下文
 ScreenContext* CreateScreenContext(void* device, void* context);
 
-// 全局：当前是否处于"抓不到画面"状态（独占全屏等），供 UI 提示
-bool IsCaptureDegraded();
-
 } // namespace gpu
 
 // ==========================================
