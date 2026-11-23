@@ -3,13 +3,18 @@
 // ==========================================
 // 托盘图标与窗口图标。由 windres 编译（见 scripts/build.sh）。
 // 注意：这里不 #include <windows.h> —— windres 不是 C 预处理器。
+// D4（对端复测）：本文件是 UTF-8，但 windres 默认按本地码页（1252/936）
+// 读入——中文字符串被错误解码进资源，属性页显示乱码。
+// #pragma code_page(65001) 强制按 UTF-8 解释本文件。
+
+#pragma code_page(65001)
 
 // 托盘图标（16/24/32/48/256 多尺寸）
 101 ICON "resources/icon.ico"
 
 1 VERSIONINFO
-FILEVERSION     1,0,0,0
-PRODUCTVERSION  1,0,0,0
+FILEVERSION     1,8,6,0
+PRODUCTVERSION  1,8,6,0
 FILEOS          0x00040004
 FILETYPE        0x00000001
 BEGIN
@@ -18,11 +23,11 @@ BEGIN
         BLOCK "080404b0"
         BEGIN
             VALUE "FileDescription", "MyopicDefocus - 近视离焦护眼滤镜"
-            VALUE "FileVersion",     "1.0.0.0"
+            VALUE "FileVersion",     "1.8.6.0"
             VALUE "InternalName",    "MyopicDefocus"
             VALUE "OriginalFilename","MyopicDefocus.exe"
             VALUE "ProductName",     "MyopicDefocus"
-            VALUE "ProductVersion",  "1.0.0.0"
+            VALUE "ProductVersion",  "1.8.6.0"
         END
     END
     BLOCK "VarFileInfo"

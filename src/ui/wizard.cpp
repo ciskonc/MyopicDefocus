@@ -220,12 +220,22 @@ bool CommitValues(HWND hwnd, AppState* state) {
 INT_PTR CALLBACK WizardDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
         case WM_INITDIALOG: {
+            // ⚠ D1（阻塞级，v1.8 起存在）：AppState* 只经 WM_INITDIALOG 的 lParam
+            //   传入一次，必须在这里保存；WM_COMMAND 的 lParam 是按钮 HWND，
+            //   旧代码直接把它当 state 用 → CommitValues 写野地址 →
+            //   0xC000041D（STATUS_FATAL_USER_CALLBACK_EXCEPTION）崩溃退出。
+            ::SetWindowLongPtrW(hwnd, GWLP_USERDATA, lp);
             // 两个输入项的默认值（跟随 kFields 数量）
             for (const WizardField& f : kFields) {
                 wchar_t buf[32] = {};
                 swprintf_s(buf, L"%g", static_cast<double>(f.defValue));
                 ::SetDlgItemTextW(hwnd, f.id, buf);
             }
+            // D8：程序从后台启动时向导曾被活动窗口完全盖住（此时无 overlay、
+            // 无托盘，用户什么都看不到）——置顶 + 前台
+            ::SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                           SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            ::SetForegroundWindow(hwnd);
             ::SetFocus(::GetDlgItem(hwnd, kIdDist));
             return TRUE;
         }
@@ -233,7 +243,8 @@ INT_PTR CALLBACK WizardDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_COMMAND: {
             const int id = LOWORD(wp);
             if (id == IDOK) {
-                AppState* state = reinterpret_cast<AppState*>(lp);
+                auto* state = reinterpret_cast<AppState*>(
+                    ::GetWindowLongPtrW(hwnd, GWLP_USERDATA));
                 if (CommitValues(hwnd, state)) {
                     ::EndDialog(hwnd, IDOK);
                 }
@@ -263,13 +274,13 @@ bool RunFirstRunWizard(HWND ownerWnd, AppState* state) {
     if (tmpl.empty()) return false;
 
     DLGTEMPLATE* dt = reinterpret_cast<DLGTEMPLATE*>(tmpl.data());
-    // 模板字节头（T6 诊断锚点：head/cdit/class 原子位置可肉眼比对）
+    // 模板字节锚点（T6 诊断）：cdit 在 [8..9]，menu/class/title 前移后布局见
+    // test_wizard_template.cpp 同名锚点——两处必须一致，改一处必改另一处
     {
         char b[200];
-        sprintf_s(b, "[wizard] template bytes: %zu, head08=%02X%02X cdit=%u, w[18]=%04X w[20]=%04X w[22]=%04X",
+        sprintf_s(b, "[wizard] template bytes: %zu, cdit=%u, menu@18=%04X class@20=%04X title@22=%04X",
                   tmpl.size(),
-                  tmpl[8], tmpl[9],
-                  (unsigned)tmpl[10] | ((unsigned)tmpl[11] << 8),
+                  (unsigned)tmpl[8] | ((unsigned)tmpl[9] << 8),
                   (unsigned)tmpl[18] | ((unsigned)tmpl[19] << 8),
                   (unsigned)tmpl[20] | ((unsigned)tmpl[21] << 8),
                   (unsigned)tmpl[22] | ((unsigned)tmpl[23] << 8));

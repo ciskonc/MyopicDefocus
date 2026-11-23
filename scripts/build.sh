@@ -1,45 +1,34 @@
 #!/usr/bin/env bash
 # ==========================================
-# build.sh — 用 LLVM MinGW 构建（免 Visual Studio / 免管理员）
+# build.sh — 用 LLVM MinGW 构建（免 UAC / 免 Visual Studio 工作负载）
 # ==========================================
 # 用法:
-#   bash scripts/build.sh            # 构建全部（测试 + 主程序）
+#   bash scripts/build.sh            # 构建全部
 #   bash scripts/build.sh tests      # 只构建测试 exe
-#   bash scripts/build.sh app        # 只构建主程序 exe
-#   bash scripts/build.sh test       # 构建 + 运行自检
 #
-# 工具链：需要 LLVM MinGW（https://github.com/mstorsjo/llvm-mingw/releases）。
-# 用环境变量 TC 指定工具链目录：
-#   TC=/path/to/llvm-mingw-ucrt-x86_64 bash scripts/build.sh
+# 工具链位置可用环境变量覆盖：
+#   TC=/path/to/llvm-mingw-... bash scripts/build.sh
 set -euo pipefail
 
 PROJ_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SRC="$PROJ_ROOT/src"
+SRC="$PROJ_ROOT/src/src"
 BUILD="$PROJ_ROOT/build"
 
-# —— 工具链定位：TC 环境变量优先，其次 PATH 探测 ——
-if [ -z "${TC:-}" ]; then
-  CXX_ON_PATH="$(command -v x86_64-w64-mingw32-clang++.exe || command -v x86_64-w64-mingw32-clang++ || true)"
-  if [ -n "$CXX_ON_PATH" ]; then
-    TC="$(cd "$(dirname "$CXX_ON_PATH")/.." && pwd)"
-  fi
-fi
-TC="${TC:-}"
-CXX="${TC:+$TC/bin/}x86_64-w64-mingw32-clang++.exe"
-WINDRES="${TC:+$TC/bin/}x86_64-w64-mingw32-windres.exe"
-INCLUDE="${TC:+$TC/include}"
+TC="${TC:-/c/Users/Gamer/Desktop/agent/03_TOOLS/toolchains/llvm-mingw-20261104-ucrt-x86_64}"
+CXX="$TC/bin/x86_64-w64-mingw32-clang++.exe"
+WINDRES="$TC/bin/x86_64-w64-mingw32-windres.exe"
+INCLUDE="$TC/include"
 
-if ! command -v "$CXX" >/dev/null 2>&1 && [ ! -x "$CXX" ]; then
-  echo "找不到 LLVM MinGW 编译器。" >&2
-  echo "请从 https://github.com/mstorsjo/llvm-mingw/releases 下载解压后设置：" >&2
-  echo "  TC=/path/to/llvm-mingw-ucrt-x86_64 bash scripts/build.sh" >&2
+if [ ! -x "$CXX" ]; then
+  echo "找不到编译器: $CXX" >&2
+  echo "请设置 TC 环境变量指向 llvm-mingw 目录" >&2
   exit 1
 fi
 
 mkdir -p "$BUILD"
 
 # clang.exe 是原生 Windows 程序，拿 MSYS 的 /tmp 会导致 "unable to make temporary file"。
-# 把 TEMP/TMP 指到项目内可写目录，并转成 Windows 路径。
+# 这里把 TEMP/TMP 指向项目内可写目录，并转成 Windows 路径。
 TMP_WORK="${TMP_WORK:-$PROJ_ROOT/build/tmp}"
 mkdir -p "$TMP_WORK"
 if command -v cygpath >/dev/null 2>&1; then
@@ -66,10 +55,10 @@ COMMON_FLAGS=(
   -D_WIN32_WINNT=0x0A00
   -DWINVER=0x0A00
   -DNTDDI_VERSION=0x0A000000
+  -I "$INCLUDE"
   -I "$SRC"
   -I "$SRC/third_party"
 )
-[ -n "$INCLUDE" ] && COMMON_FLAGS+=(-I "$INCLUDE")
 
 LINK_FLAGS=(
   -static
@@ -118,8 +107,9 @@ build_tests() {
 build_app() {
   echo "==> 构建 MyopicDefocus.exe (GUI, 单 exe 自包含)"
 
+  # 资源脚本（图标 + 版本信息）→ windres
   echo "    编译资源 app.rc ..."
-  "$WINDRES" -I "$SRC" ${INCLUDE:+-I "$INCLUDE"} -O coff \
+  "$WINDRES" --codepage 65001 -I "$SRC" -I "$INCLUDE" -O coff \
     -o "$BUILD/app_res.o" "$SRC/app/app.rc"
 
   local APP_SRCS=(
@@ -142,21 +132,23 @@ build_app() {
     "$BUILD/app_res.o" \
     -o "$BUILD/MyopicDefocus.exe" \
     "${LINK_FLAGS[@]}"
-  echo "    OK: $BUILD/MyopicDefocus.exe"
+  # 去掉 Low 强制标签：文件标签会把进程 IL 压到 Low，
+  # 导致向 explorer.exe 发消息被 UIPI 拦截 → 托盘图标建不出来。
+  icacls "$BUILD/MyopicDefocus.exe" /setintegritylevel M >/dev/null 2>&1 || true
+  icacls "$BUILD/MyopicDefocusTests.exe" /setintegritylevel M >/dev/null 2>&1 || true
+  echo "    OK: $BUILD/MyopicDefocus.exe (integrity level set to Medium)"
 }
 
 case "${1:-all}" in
   tests) build_tests ;;
   app)   build_app ;;
   test)  build_tests
-         # CI/受限环境下 %APPDATA% 可能不可写：把 APPDATA 指向项目内目录跑自检
+         # DSH 的 Job Object 会禁止子进程写工作区之外的目录（如 %APPDATA%），
+         # 实测 CreateFileW 直接返回 ERROR_ACCESS_DENIED。
+         # 因此测试时把 APPDATA 指向工作区内的可写目录；真实用户环境不受影响。
          TEST_APPDATA="$PROJ_ROOT/build/testappdata"
          mkdir -p "$TEST_APPDATA"
-         if command -v cygpath >/dev/null 2>&1; then
-           APPDATA="$(cygpath -w "$TEST_APPDATA")" "$BUILD/MyopicDefocusTests.exe"
-         else
-           APPDATA="$TEST_APPDATA" "$BUILD/MyopicDefocusTests.exe"
-         fi ;;
+         APPDATA="$(cygpath -w "$TEST_APPDATA")" "$BUILD/MyopicDefocusTests.exe" ;;
   all)   build_tests; build_app ;;
   *) echo "未知目标: $1 (可用: tests / app / test / all)" >&2; exit 1 ;;
 esac

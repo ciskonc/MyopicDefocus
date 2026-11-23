@@ -563,8 +563,15 @@ void ScreenRenderer::CaptureFrame() {
                 }
                 screen_.width  = static_cast<int>(srcDesc.Width);
                 screen_.height = static_cast<int>(srcDesc.Height);
-                LogInfo("[gpu] display mode changed - overlay resized to " +
-                        std::to_string(srcDesc.Width) + "x" + std::to_string(srcDesc.Height));
+                // D5（对端复测）：模式切换后重建的下一帧可能再次进入本分支，
+                // 尺寸未变就不重复打日志
+                static int loggedW = 0, loggedH = 0;
+                if (loggedW != screen_.width || loggedH != screen_.height) {
+                    loggedW = screen_.width;
+                    loggedH = screen_.height;
+                    LogInfo("[gpu] display mode changed - overlay resized to " +
+                            std::to_string(srcDesc.Width) + "x" + std::to_string(srcDesc.Height));
+                }
 
                 UpdateShaderParams();
             }

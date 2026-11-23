@@ -42,6 +42,31 @@ void SelfTestLogAppend(const char* text) {
 }
 
 int RunSelfTest() {
+    // D2（对端复测发现）：往返用例会真实读写配置文件——不重定向就会碰用户的
+    // %APPDATA%\MyopicDefocus\config.json（mtime 被更新；中途被杀还会把
+    // 测试值留在用户配置里）。GetAppDataDir 每次现读环境变量，这里改即全局生效。
+    //
+    // ⚠ sandbox 选 exe 同目录而非 %TEMP%：受限环境（Job Object/低完整性标签）
+    //   禁写 %TEMP% 时 CreateDirectory 静默失败，SaveConfig 会回退到 exe 同
+    //   目录读到历史残留（实测 5 断言假阴性）。exe 所在目录始终可写。
+    {
+        char exePath[MAX_PATH] = {};
+        if (GetModuleFileNameA(nullptr, exePath, MAX_PATH)) {
+            std::string dir(exePath);
+            const size_t slash = dir.find_last_of("\\/");
+            if (slash != std::string::npos) {
+                dir.resize(slash);
+                std::string sandbox = dir + "\\selftest-sandbox";
+                CreateDirectoryA(sandbox.c_str(), nullptr);
+                // ⚠ 必须用 _putenv 而非 SetEnvironmentVariableA：
+                //   GetAppDataDir 走 _wgetenv（CRT 环境副本），Win32 层设置
+                //   不会同步进 CRT 副本——重定向会静默失效（实测 5 断言假阴性）
+                std::string env = "APPDATA=" + sandbox;
+                _putenv(env.c_str());
+            }
+        }
+    }
+
     SelfTestLogAppend("============================================\n");
     SelfTestLogAppend("  MyopicDefocus 自检套件\n");
     SelfTestLogAppend("============================================\n");

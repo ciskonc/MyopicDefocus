@@ -135,17 +135,13 @@ void OnToggleOverlay() {
         // 手动暂停：立即隐藏，主循环下一轮停止渲染
         g_render.SetOverlayVisible(false);
         g_overlayShown = false;
-        LogInfo("[app] overlay paused");
     }
     // 手动恢复不在这里显示窗口：交给主循环在抓屏成功后显示，
     // 避免游戏运行中恢复时把最后一帧旧画面冻结在屏幕上。
     md::ui::UpdateTrayMenu();
     md::ui::UpdateControlBarState(g_state.overlayActive);
-    if (g_state.overlayActive) {
-        LogInfo("[app] overlay resumed");
-    } else {
-        LogInfo("[app] overlay paused");
-    }
+    // D5（对端复测）：日志只打一次——旧代码暂停时 here 和下方 if/else 各打一遍
+    LogInfo(g_state.overlayActive ? "[app] overlay resumed" : "[app] overlay paused");
 }
 
 void PrintUsage() {
@@ -418,6 +414,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
             Sleep(5);
         }
         g_render.SaveFrames(captureDir, L"f2");
+        // D3（对端复测）：capture 分支此前直接退出，托盘图标残留堆积
+        md::ui::RemoveTrayIcon();
         g_render.Shutdown();
         return 0;
     }
@@ -433,6 +431,10 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
             OnParamsChanged();
         } else {
             LogInfo("[app] first-run wizard returned cancel/fail");
+            // 对端复测「其它」条：取消后用户拿到默认参数却毫不知情
+            md::ui::ShowTrayTip(L"MyopicDefocus",
+                L"未完成首次设置，已使用默认参数（距离 40cm / 瞳孔 6500μm）。\n"
+                L"可随时通过 Ctrl+Alt+S 打开设置面板修改。");
         }
         // 向导结束（无论确定/取消）才创建并显示 overlay
         if (deferredSetup && !g_render.SetupScreens(g_state.screens)) {
